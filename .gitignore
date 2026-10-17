@@ -39,3 +39,7 @@ backend/build/
 # Output folder (user generated)
 output/
 WatermarkedImages/
+
+# Cloudflare Wrangler
+.wrangler/
+.dev.vars

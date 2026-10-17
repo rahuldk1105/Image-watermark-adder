@@ -1,12 +1,45 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { zipSync } from 'fflate'
 import { Icons } from './components/Icons'
 import ImageUploader from './components/ImageUploader'
 import WatermarkUploader from './components/WatermarkUploader'
 import WatermarkControls from './components/WatermarkControls'
 import PreviewPanel from './components/PreviewPanel'
 import ProcessingPanel from './components/ProcessingPanel'
+import {
+    applyWatermark,
+    buildWatermark,
+    encodeCanvas,
+    loadBitmap,
+    outputName,
+    outputType
+} from './lib/watermark'
 
-const API_URL = 'http://127.0.0.1:8765'
+const API_BASE = import.meta.env.VITE_API_BASE || ''
+const PREVIEW_MAX_SIZE = 1600
+
+let nextId = 0
+
+function uniqueName(name, used) {
+    let candidate = name
+    let n = 1
+    while (used.has(candidate.toLowerCase())) {
+        candidate = name.replace(/(\.[^.]+)?$/, `-${n++}$1`)
+    }
+    used.add(candidate.toLowerCase())
+    return candidate
+}
+
+function downloadBlob(blob, fileName) {
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = fileName
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(url), 10000)
+}
 
 function App() {
     // Image state
@@ -20,6 +53,9 @@ function App() {
 
     // Watermark settings
     const [settings, setSettings] = useState({
+        watermark_type: 'logo',
+        text: '© Your Name',
+        text_color: '#ffffff',
         position: 'bottom-right',
         size_percent: 20,
         opacity: 100,
@@ -30,14 +66,18 @@ function App() {
 
     // Preview state
     const [previewImage, setPreviewImage] = useState(null)
+    const [previewReport, setPreviewReport] = useState(null)
     const [isLoadingPreview, setIsLoadingPreview] = useState(false)
 
     // Image loading state
     const [isLoadingImages, setIsLoadingImages] = useState(false)
     const [uploadProgress, setUploadProgress] = useState({ current: 0, total: 0 })
 
-    // Processing state
-    const [outputDir, setOutputDir] = useState('')
+    // Output / processing state
+    const [downloadZip, setDownloadZip] = useState(true)
+    const [uploadS3, setUploadS3] = useState(false)
+    const [s3Available, setS3Available] = useState(false)
+    const [s3Uploads, setS3Uploads] = useState([])
     const [isProcessing, setIsProcessing] = useState(false)
     const [processProgress, setProcessProgress] = useState(0)
     const [processMessage, setProcessMessage] = useState(null)
@@ -45,104 +85,84 @@ function App() {
     // Debounce ref for preview
     const previewTimeoutRef = useRef(null)
 
-    // Initialize output directory
+    // Ask the Cloudflare Worker whether Amazon S3 storage is configured
     useEffect(() => {
-        const initOutputDir = async () => {
-            if (window.electronAPI) {
-                try {
-                    const dir = await window.electronAPI.getDefaultOutputDir()
-                    setOutputDir(dir)
-                } catch (error) {
-                    console.error('Error getting default output dir:', error)
-                }
-            }
-        }
-        initOutputDir()
+        fetch(`${API_BASE}/api/health`)
+            .then((res) => (res.ok ? res.json() : null))
+            .then((data) => setS3Available(Boolean(data?.s3)))
+            .catch(() => setS3Available(false))
     }, [])
 
-    // Generate preview with debounce when settings change
-    useEffect(() => {
-        // Clear previous timeout
-        if (previewTimeoutRef.current) {
-            clearTimeout(previewTimeoutRef.current)
-        }
+    // Release the previous preview blob URL
+    useEffect(() => () => {
+        if (previewImage) URL.revokeObjectURL(previewImage)
+    }, [previewImage])
 
-        // Set new debounced timeout (300ms delay)
-        previewTimeoutRef.current = setTimeout(() => {
-            generatePreview()
-        }, 300)
+    const watermarkCanvas = useMemo(
+        () => buildWatermark(settings, watermark?.bitmap),
+        [settings.watermark_type, settings.text, settings.text_color,
+            settings.remove_bg, settings.bg_threshold, watermark]
+    )
 
-        // Cleanup
-        return () => {
-            if (previewTimeoutRef.current) {
-                clearTimeout(previewTimeoutRef.current)
-            }
-        }
-    }, [settings, watermark, selectedImageIndex, images])
-
-    const generatePreview = async () => {
+    const generatePreview = useCallback(async () => {
         const selectedImage = images[selectedImageIndex]
 
-        if (!selectedImage || !watermark) {
+        if (!selectedImage || !watermarkCanvas) {
             setPreviewImage(null)
+            setPreviewReport(null)
             return
         }
 
         setIsLoadingPreview(true)
 
         try {
-            const response = await fetch(`${API_URL}/preview`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    image: selectedImage.data,
-                    watermark: watermark.data,
-                    settings: settings
-                })
-            })
-
-            if (!response.ok) {
-                throw new Error('Preview generation failed')
-            }
-
-            const data = await response.json()
-            setPreviewImage(data.preview)
+            const bitmap = await createImageBitmap(selectedImage.file)
+            const { canvas, report } = applyWatermark(bitmap, watermarkCanvas, settings, PREVIEW_MAX_SIZE)
+            bitmap.close()
+            const blob = await encodeCanvas(canvas, 'image/png')
+            setPreviewImage(URL.createObjectURL(blob))
+            setPreviewReport(report)
         } catch (error) {
             console.error('Preview error:', error)
             setPreviewImage(null)
+            setPreviewReport(null)
         } finally {
             setIsLoadingPreview(false)
         }
-    }
+    }, [images, selectedImageIndex, watermarkCanvas, settings])
 
-    const handleImagesSelected = async (filePaths) => {
-        if (!window.electronAPI) return
+    // Generate preview with debounce when settings change
+    useEffect(() => {
+        if (previewTimeoutRef.current) {
+            clearTimeout(previewTimeoutRef.current)
+        }
+        previewTimeoutRef.current = setTimeout(generatePreview, 250)
 
+        return () => {
+            if (previewTimeoutRef.current) {
+                clearTimeout(previewTimeoutRef.current)
+            }
+        }
+    }, [generatePreview])
+
+    const handleImagesSelected = async (files) => {
         setIsLoadingImages(true)
-        setUploadProgress({ current: 0, total: filePaths.length })
+        setUploadProgress({ current: 0, total: files.length })
 
         const newImages = []
         const newDuplicates = []
         const existingNames = new Set(images.map(img => img.name.toLowerCase()))
 
-        for (let i = 0; i < filePaths.length; i++) {
-            const path = filePaths[i]
-            setUploadProgress({ current: i + 1, total: filePaths.length })
+        for (let i = 0; i < files.length; i++) {
+            const file = files[i]
+            setUploadProgress({ current: i + 1, total: files.length })
+            const nameLower = file.name.toLowerCase()
 
-            try {
-                const imageData = await window.electronAPI.readImageAsBase64(path)
-                const nameLower = imageData.name.toLowerCase()
-
-                if (existingNames.has(nameLower)) {
-                    newDuplicates.push(imageData.name)
-                } else {
-                    existingNames.add(nameLower)
-                    newImages.push(imageData)
-                }
-            } catch (error) {
-                console.error('Error reading image:', error)
+            if (existingNames.has(nameLower)) {
+                newDuplicates.push(file.name)
+            } else {
+                existingNames.add(nameLower)
+                newImages.push({ id: ++nextId, name: file.name, file, url: URL.createObjectURL(file) })
             }
         }
 
@@ -159,18 +179,23 @@ function App() {
         }
     }
 
-    const handleWatermarkSelected = async (filePath) => {
-        if (!window.electronAPI || !filePath) return
-
+    const handleWatermarkSelected = async (file) => {
         try {
-            const watermarkData = await window.electronAPI.readImageAsBase64(filePath)
-            setWatermark(watermarkData)
+            const bitmap = await loadBitmap(file)
+            if (watermark) URL.revokeObjectURL(watermark.url)
+            setWatermark({ name: file.name, url: URL.createObjectURL(file), bitmap })
         } catch (error) {
             console.error('Error reading watermark:', error)
         }
     }
 
+    const handleClearWatermark = () => {
+        if (watermark) URL.revokeObjectURL(watermark.url)
+        setWatermark(null)
+    }
+
     const handleRemoveImage = (index) => {
+        URL.revokeObjectURL(images[index].url)
         setImages(prev => prev.filter((_, i) => i !== index))
         if (selectedImageIndex >= index && selectedImageIndex > 0) {
             setSelectedImageIndex(prev => prev - 1)
@@ -178,9 +203,11 @@ function App() {
     }
 
     const handleClearImages = () => {
+        images.forEach(img => URL.revokeObjectURL(img.url))
         setImages([])
         setSelectedImageIndex(0)
         setPreviewImage(null)
+        setPreviewReport(null)
         setDuplicates([])
         setShowDuplicateWarning(false)
     }
@@ -190,83 +217,82 @@ function App() {
         setDuplicates([])
     }
 
-    const handleRemoveDuplicates = () => {
-        const seen = new Set()
-        const uniqueImages = images.filter(img => {
-            const nameLower = img.name.toLowerCase()
-            if (seen.has(nameLower)) {
-                return false
-            }
-            seen.add(nameLower)
-            return true
+    const uploadToS3 = async (blob, name) => {
+        const response = await fetch(`${API_BASE}/api/upload?name=${encodeURIComponent(name)}`, {
+            method: 'POST',
+            headers: { 'Content-Type': blob.type },
+            body: blob
         })
-
-        setImages(uniqueImages)
-        setShowDuplicateWarning(false)
-        setDuplicates([])
-
-        if (selectedImageIndex >= uniqueImages.length) {
-            setSelectedImageIndex(Math.max(0, uniqueImages.length - 1))
+        if (!response.ok) {
+            throw new Error((await response.text()) || `Upload failed (${response.status})`)
         }
+        return response.json()
     }
 
-    const handleSelectOutputDir = async () => {
-        if (!window.electronAPI) return
-
-        const dir = await window.electronAPI.selectOutputDirectory()
-        if (dir) {
-            setOutputDir(dir)
-        }
-    }
-
-    // Process images one at a time to avoid string length issues
+    // Process images one at a time in the browser
     const handleApplyWatermark = async () => {
-        if (images.length === 0 || !watermark || !outputDir) return
+        if (images.length === 0 || !watermarkCanvas) return
 
         setIsProcessing(true)
         setProcessProgress(0)
         setProcessMessage(null)
+        setS3Uploads([])
 
         let processed = 0
         let failed = 0
+        let uploadError = null
+        const zipEntries = {}
+        const usedNames = new Set()
+        const uploads = []
 
         try {
             for (let i = 0; i < images.length; i++) {
                 const img = images[i]
-                setProcessProgress(Math.round(((i) / images.length) * 100))
+                setProcessProgress(Math.round((i / images.length) * 100))
+                // Let the progress bar repaint between images
+                await new Promise(resolve => setTimeout(resolve, 0))
 
                 try {
-                    const response = await fetch(`${API_URL}/apply`, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({
-                            images: [{
-                                path: img.path,
-                                data: img.data
-                            }],
-                            watermark: watermark.data,
-                            settings: settings,
-                            output_dir: outputDir
-                        })
-                    })
+                    const bitmap = await createImageBitmap(img.file)
+                    const { canvas } = applyWatermark(bitmap, watermarkCanvas, settings)
+                    bitmap.close()
+                    const mime = outputType(img.name)
+                    const blob = await encodeCanvas(canvas, mime)
+                    const name = uniqueName(outputName(img.name), usedNames)
 
-                    if (response.ok) {
-                        processed++
-                    } else {
-                        failed++
+                    if (downloadZip) {
+                        zipEntries[name] = new Uint8Array(await blob.arrayBuffer())
                     }
+                    if (uploadS3) {
+                        try {
+                            const result = await uploadToS3(blob, name)
+                            uploads.push({ name, ...result })
+                        } catch (err) {
+                            uploadError = err.message
+                            throw err
+                        }
+                    }
+                    processed++
                 } catch (err) {
                     console.error('Error processing image:', img.name, err)
                     failed++
                 }
             }
 
+            if (downloadZip && processed > 0) {
+                // Images are already compressed, so store them without re-compressing
+                downloadBlob(new Blob([zipSync(zipEntries, { level: 0 })], { type: 'application/zip' }),
+                    'watermarked-images.zip')
+            }
+
             setProcessProgress(100)
+            setS3Uploads(uploads)
             setProcessMessage({
-                type: 'success',
-                text: `Successfully processed ${processed} images.${failed > 0 ? ` ${failed} failed.` : ''}`
+                type: failed > 0 ? 'error' : 'success',
+                text: `Processed ${processed} image${processed !== 1 ? 's' : ''}` +
+                    (uploads.length > 0 ? `, ${uploads.length} uploaded to Amazon S3` : '') +
+                    '.' +
+                    (failed > 0 ? ` ${failed} failed${uploadError ? ` (${uploadError})` : ''}.` : '')
             })
         } catch (error) {
             console.error('Processing error:', error)
@@ -286,10 +312,10 @@ function App() {
                     <div className="logo">
                         <Icons.Layers size={22} />
                     </div>
-                    <h1>Bulk Image Watermarker</h1>
+                    <h1>Image Watermark Generation</h1>
                 </div>
                 <div className="header-meta">
-                    <span className="version">v2.2.0</span>
+                    <span className="version">v3.0.0</span>
                 </div>
             </header>
 
@@ -306,9 +332,6 @@ function App() {
                             </span>
                         </div>
                         <div className="duplicate-warning-actions">
-                            <button className="btn-warning" onClick={handleRemoveDuplicates}>
-                                Remove All Duplicates
-                            </button>
                             <button className="btn-dismiss" onClick={handleDismissDuplicateWarning}>
                                 <Icons.X size={16} />
                             </button>
@@ -328,7 +351,7 @@ function App() {
                         <ImageUploader
                             images={images}
                             selectedIndex={selectedImageIndex}
-                            onSelect={(paths) => handleImagesSelected(paths)}
+                            onSelect={handleImagesSelected}
                             onSelectImage={setSelectedImageIndex}
                             onRemove={handleRemoveImage}
                             onClear={handleClearImages}
@@ -343,9 +366,11 @@ function App() {
                             <h3>Watermark</h3>
                         </div>
                         <WatermarkUploader
+                            settings={settings}
+                            onChange={setSettings}
                             watermark={watermark}
                             onSelect={handleWatermarkSelected}
-                            onClear={() => setWatermark(null)}
+                            onClear={handleClearWatermark}
                         />
                     </div>
                 </aside>
@@ -356,18 +381,23 @@ function App() {
                         images={images}
                         selectedIndex={selectedImageIndex}
                         previewImage={previewImage}
+                        report={previewReport}
                         isLoading={isLoadingPreview}
                         onSelectImage={setSelectedImageIndex}
                     />
 
                     <ProcessingPanel
-                        outputDir={outputDir}
-                        onChangeDir={handleSelectOutputDir}
+                        downloadZip={downloadZip}
+                        onToggleZip={() => setDownloadZip(v => !v)}
+                        uploadS3={uploadS3}
+                        onToggleS3={() => setUploadS3(v => !v)}
+                        s3Available={s3Available}
                         onApply={handleApplyWatermark}
                         isProcessing={isProcessing}
                         progress={processProgress}
                         message={processMessage}
-                        canApply={images.length > 0 && watermark !== null}
+                        uploads={s3Uploads}
+                        canApply={images.length > 0 && watermarkCanvas !== null}
                         imageCount={images.length}
                     />
                 </div>

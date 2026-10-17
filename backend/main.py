@@ -1,38 +1,41 @@
 """
-FastAPI Backend for Bulk Image Watermarker
-Provides REST API endpoints for preview and bulk watermarking
+FastAPI Backend for Image Watermark Generation
+Python + OpenCV implementation of the watermarking algorithm, with Amazon S3 upload.
 """
 
 import os
-import sys
+from typing import List, Literal, Optional
+
+import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import List, Literal, Optional
-import uvicorn
 
+import s3_storage
 from watermark import (
+    PositionType,
     apply_watermark,
-    image_to_base64,
-    base64_to_image,
-    remove_background,
-    PositionType
+    base64_to_bytes,
+    build_watermark,
+    bytes_to_data_uri,
+    decode_image,
+    encode_image,
 )
-from PIL import Image
 
-app = FastAPI(title="Bulk Image Watermarker API")
+app = FastAPI(title="Image Watermark Generation API")
 
-# Enable CORS for Electron renderer
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
 class WatermarkSettings(BaseModel):
+    watermark_type: Literal["logo", "text"] = "logo"
+    text: str = "© Watermark"
+    text_color: str = "#ffffff"
     position: PositionType = "bottom-right"
     size_percent: float = 20.0
     opacity: int = 100
@@ -43,189 +46,104 @@ class WatermarkSettings(BaseModel):
 
 class PreviewRequest(BaseModel):
     image: str  # Base64 encoded image
-    watermark: str  # Base64 encoded watermark
+    watermark: Optional[str] = None  # Base64 encoded logo (not needed for text)
     settings: WatermarkSettings
 
 
-class PreviewResponse(BaseModel):
-    preview: str  # Base64 encoded preview image
+class ImageItem(BaseModel):
+    name: str
+    data: str  # Base64 encoded image
 
 
 class ApplyRequest(BaseModel):
-    images: List[dict]  # List of {path, data} or just paths
-    watermark: str  # Base64 encoded watermark
+    images: List[ImageItem]
+    watermark: Optional[str] = None
     settings: WatermarkSettings
-    output_dir: str
+    upload_to_s3: bool = False
+    output_dir: Optional[str] = None  # optional: also save to a local folder
 
 
-class ApplyResponse(BaseModel):
-    success: bool
-    processed: int
-    failed: int
-    message: str
+def prepare_watermark(settings: WatermarkSettings, logo_b64: Optional[str]):
+    logo = decode_image(base64_to_bytes(logo_b64), keep_alpha=True) if logo_b64 else None
+    return build_watermark(
+        settings.watermark_type,
+        logo=logo,
+        text=settings.text,
+        text_color=settings.text_color,
+        remove_bg=settings.remove_bg,
+        bg_threshold=settings.bg_threshold,
+    )
 
 
-class RemoveBgRequest(BaseModel):
-    image: str  # Base64 encoded image
-    threshold: int = 240
-
-
-class RemoveBgResponse(BaseModel):
-    image: str  # Base64 encoded image with background removed
+def run(image_b64: str, watermark, settings: WatermarkSettings):
+    image = decode_image(base64_to_bytes(image_b64))
+    return apply_watermark(
+        image,
+        watermark,
+        position=settings.position,
+        size_percent=settings.size_percent,
+        opacity=settings.opacity,
+        padding=settings.padding,
+    )
 
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    return {"status": "ok", "message": "Watermark API is running"}
+    return {"status": "ok", "engine": "opencv", "s3": s3_storage.is_configured()}
 
 
-@app.post("/remove-background", response_model=RemoveBgResponse)
-async def remove_background_endpoint(request: RemoveBgRequest):
-    """
-    Remove background from an image.
-    """
-    try:
-        # Decode image
-        image = base64_to_image(request.image)
-        
-        # Remove background
-        result = remove_background(image, request.threshold)
-        
-        # Convert to base64
-        result_base64 = image_to_base64(result, "PNG")
-        
-        return RemoveBgResponse(image=result_base64)
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/preview", response_model=PreviewResponse)
+@app.post("/preview")
 async def generate_preview(request: PreviewRequest):
-    """
-    Generate a preview of the watermarked image.
-    Returns base64 encoded preview image.
-    """
+    """Return a PNG preview plus the algorithm's placement report."""
     try:
-        # Decode images from base64
-        image = base64_to_image(request.image)
-        watermark = base64_to_image(request.watermark)
-        
-        # Remove background from watermark if requested
-        if request.settings.remove_bg:
-            watermark = remove_background(watermark, request.settings.bg_threshold)
-        
-        # Apply watermark
-        result = apply_watermark(
-            image=image,
-            watermark=watermark,
-            position=request.settings.position,
-            size_percent=request.settings.size_percent,
-            opacity=request.settings.opacity,
-            padding=request.settings.padding
-        )
-        
-        # Convert to base64
-        preview_base64 = image_to_base64(result, "PNG")
-        
-        return PreviewResponse(preview=preview_base64)
-        
+        watermark = prepare_watermark(request.settings, request.watermark)
+        result, report = run(request.image, watermark, request.settings)
+        data, mime = encode_image(result, "png")
+        return {"preview": bytes_to_data_uri(data, mime), "report": report}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
 
 
-@app.post("/apply", response_model=ApplyResponse)
+@app.post("/apply")
 async def apply_watermark_bulk(request: ApplyRequest):
-    """
-    Apply watermark to all provided images and save to output directory.
-    """
+    """Watermark every image, optionally save locally and/or upload to Amazon S3."""
+    if request.upload_to_s3 and not s3_storage.is_configured():
+        raise HTTPException(status_code=400, detail="S3_BUCKET is not configured")
     try:
-        # Ensure output directory exists
-        os.makedirs(request.output_dir, exist_ok=True)
-        
-        # Decode watermark
-        watermark = base64_to_image(request.watermark)
-        
-        # Remove background from watermark if requested
-        if request.settings.remove_bg:
-            watermark = remove_background(watermark, request.settings.bg_threshold)
-        
-        processed = 0
-        failed = 0
-        
-        for img_data in request.images:
-            try:
-                # Get image path and data
-                file_path = img_data.get("path", "")
-                image_base64 = img_data.get("data", "")
-                
-                if not image_base64:
-                    failed += 1
-                    continue
-                
-                # Decode image
-                image = base64_to_image(image_base64)
-                original_mode = image.mode
-                
-                # Apply watermark
-                result = apply_watermark(
-                    image=image,
-                    watermark=watermark,
-                    position=request.settings.position,
-                    size_percent=request.settings.size_percent,
-                    opacity=request.settings.opacity,
-                    padding=request.settings.padding
-                )
-                
-                # Get original filename
-                filename = os.path.basename(file_path) if file_path else f"image_{processed + 1}.png"
-                output_path = os.path.join(request.output_dir, filename)
-                
-                # Determine format from extension
-                ext = os.path.splitext(filename)[1].lower()
-                
-                if ext in ['.jpg', '.jpeg']:
-                    # Convert to RGB for JPEG
-                    if result.mode == 'RGBA':
-                        background = Image.new('RGB', result.size, (255, 255, 255))
-                        background.paste(result, mask=result.split()[3])
-                        result = background
-                    result.save(output_path, 'JPEG', quality=98)
-                else:
-                    # Save as PNG (lossless)
-                    result.save(output_path, 'PNG')
-                
-                processed += 1
-                
-            except Exception as e:
-                print(f"Error processing image: {e}")
-                failed += 1
-        
-        return ApplyResponse(
-            success=True,
-            processed=processed,
-            failed=failed,
-            message=f"Successfully processed {processed} images. {failed} failed."
-        )
-        
+        watermark = prepare_watermark(request.settings, request.watermark)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if request.output_dir:
+        os.makedirs(request.output_dir, exist_ok=True)
+
+    results = []
+    for item in request.images:
+        try:
+            result, report = run(item.data, watermark, request.settings)
+            ext = os.path.splitext(item.name)[1].lower()
+            data, mime = encode_image(result, "jpeg" if ext in (".jpg", ".jpeg") else "png")
+            entry = {"name": item.name, "ok": True, "report": report,
+                     "data": bytes_to_data_uri(data, mime)}
+
+            if request.output_dir:
+                with open(os.path.join(request.output_dir, os.path.basename(item.name)), "wb") as f:
+                    f.write(data)
+            if request.upload_to_s3:
+                entry["s3"] = s3_storage.upload_image(data, item.name, mime)
+            results.append(entry)
+        except Exception as e:
+            results.append({"name": item.name, "ok": False, "error": str(e)})
+
+    processed = sum(1 for r in results if r["ok"])
+    return {"processed": processed, "failed": len(results) - processed, "results": results}
 
 
 def main():
-    """Run the FastAPI server"""
-    # Get port from environment or use default
     port = int(os.environ.get("WATERMARK_API_PORT", 8765))
-    
-    print(f"Starting Watermark API on port {port}...")
-    
-    uvicorn.run(
-        app,
-        host="127.0.0.1",
-        port=port,
-        log_level="warning"
-    )
+    host = os.environ.get("WATERMARK_API_HOST", "127.0.0.1")
+    print(f"Starting Watermark API on {host}:{port}...")
+    uvicorn.run(app, host=host, port=port, log_level="warning")
 
 
 if __name__ == "__main__":
