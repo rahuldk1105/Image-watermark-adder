@@ -24,7 +24,7 @@ Implemented in `backend/watermark.py` (OpenCV) and mirrored in `frontend/src/lib
 
 1. **Read / prepare** — decode *I* with `cv2.imdecode`. A logo is read with its alpha channel
    (BGRA); a text watermark is rendered with `cv2.putText` on a transparent canvas, with a dark
-   outline so it stays readable on light and dark backgrounds.
+   outline so it stays readable on light and dark backgrounds (ASCII text only; `©` is written as `(c)`).
 2. **Background removal (optional, logos)** — convert the logo to grayscale and make every pixel
    brighter than threshold *T* transparent: `alpha(x, y) = 0 if gray(x, y) > T`.
 3. **Scaling** — resize the watermark so its width is *s %* of the image width, keeping the aspect
@@ -77,7 +77,7 @@ For `--upload` / `upload_to_s3`, set `S3_BUCKET`, `AWS_REGION` and AWS credentia
 |----------|--------|-------------|
 | `/health` | GET | Status and whether S3 is configured |
 | `/preview` | POST | `{image, watermark?, settings}` → `{preview, report}` |
-| `/apply` | POST | `{images: [{name, data}], watermark?, settings, upload_to_s3?, output_dir?}` → per-image results, S3 keys |
+| `/apply` | POST | `{images: [{name, data}], watermark?, settings, upload_to_s3?}` → per-image results, S3 keys |
 
 `settings`: `watermark_type` (`logo` / `text`), `text`, `text_color`, `position`
 (9 anchors or `auto`), `size_percent`, `opacity` (0–100), `padding`, `remove_bg`, `bg_threshold`.
@@ -97,6 +97,7 @@ For S3 uploads in `wrangler dev`, create `.dev.vars` (git-ignored):
 ```
 AWS_ACCESS_KEY_ID=...
 AWS_SECRET_ACCESS_KEY=...
+UPLOAD_ACCESS_CODE=...   # optional
 ```
 
 and set `S3_BUCKET` / `AWS_REGION` in `wrangler.jsonc`.
@@ -127,6 +128,9 @@ The app is served at `https://image-watermark-generation.<your-subdomain>.worker
 3. Put its keys in the Worker secrets (above) and set `S3_BUCKET` / `AWS_REGION` in `wrangler.jsonc`.
 
 The Worker accepts only PNG/JPEG uploads up to 25 MB and returns a presigned link valid for one hour.
+To stop strangers from filling the bucket, uploads must come from the site itself, are limited to
+30 per minute per IP, and — recommended for a public URL — require an access code:
+`npx wrangler secret put UPLOAD_ACCESS_CODE`. The web app then asks for the code before uploading.
 
 ## Project structure
 

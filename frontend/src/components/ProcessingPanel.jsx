@@ -6,6 +6,9 @@ function ProcessingPanel({
     uploadS3,
     onToggleS3,
     s3Available,
+    accessCodeRequired,
+    accessCode,
+    onAccessCodeChange,
     onApply,
     isProcessing,
     progress,
@@ -38,6 +41,15 @@ function ProcessingPanel({
                                 />
                                 Upload to Amazon S3
                             </label>
+                            {uploadS3 && accessCodeRequired && (
+                                <input
+                                    type="password"
+                                    className="access-code"
+                                    placeholder="Upload access code"
+                                    value={accessCode}
+                                    onChange={(e) => onAccessCodeChange(e.target.value)}
+                                />
+                            )}
                         </div>
                     </div>
                 </div>
@@ -45,7 +57,8 @@ function ProcessingPanel({
                 <button
                     className="btn-primary"
                     onClick={onApply}
-                    disabled={!canApply || isProcessing || (!downloadZip && !uploadS3)}
+                    disabled={!canApply || isProcessing || (!downloadZip && !uploadS3) ||
+                        (uploadS3 && accessCodeRequired && !accessCode)}
                 >
                     {isProcessing ? (
                         <>

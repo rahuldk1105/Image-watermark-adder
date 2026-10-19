@@ -77,6 +77,8 @@ function App() {
     const [downloadZip, setDownloadZip] = useState(true)
     const [uploadS3, setUploadS3] = useState(false)
     const [s3Available, setS3Available] = useState(false)
+    const [accessCodeRequired, setAccessCodeRequired] = useState(false)
+    const [accessCode, setAccessCode] = useState('')
     const [s3Uploads, setS3Uploads] = useState([])
     const [isProcessing, setIsProcessing] = useState(false)
     const [processProgress, setProcessProgress] = useState(0)
@@ -89,7 +91,10 @@ function App() {
     useEffect(() => {
         fetch(`${API_BASE}/api/health`)
             .then((res) => (res.ok ? res.json() : null))
-            .then((data) => setS3Available(Boolean(data?.s3)))
+            .then((data) => {
+                setS3Available(Boolean(data?.s3))
+                setAccessCodeRequired(Boolean(data?.access_code_required))
+            })
             .catch(() => setS3Available(false))
     }, [])
 
@@ -220,11 +225,15 @@ function App() {
     const uploadToS3 = async (blob, name) => {
         const response = await fetch(`${API_BASE}/api/upload?name=${encodeURIComponent(name)}`, {
             method: 'POST',
-            headers: { 'Content-Type': blob.type },
+            headers: {
+                'Content-Type': blob.type,
+                ...(accessCode ? { 'X-Upload-Code': accessCode } : {})
+            },
             body: blob
         })
         if (!response.ok) {
-            throw new Error((await response.text()) || `Upload failed (${response.status})`)
+            const data = await response.json().catch(() => null)
+            throw new Error(data?.error || `Upload failed (${response.status})`)
         }
         return response.json()
     }
@@ -232,6 +241,8 @@ function App() {
     // Process images one at a time in the browser
     const handleApplyWatermark = async () => {
         if (images.length === 0 || !watermarkCanvas) return
+
+        const shouldUpload = uploadS3 && s3Available
 
         setIsProcessing(true)
         setProcessProgress(0)
@@ -260,10 +271,7 @@ function App() {
                     const blob = await encodeCanvas(canvas, mime)
                     const name = uniqueName(outputName(img.name), usedNames)
 
-                    if (downloadZip) {
-                        zipEntries[name] = new Uint8Array(await blob.arrayBuffer())
-                    }
-                    if (uploadS3) {
+                    if (shouldUpload) {
                         try {
                             const result = await uploadToS3(blob, name)
                             uploads.push({ name, ...result })
@@ -271,6 +279,9 @@ function App() {
                             uploadError = err.message
                             throw err
                         }
+                    }
+                    if (downloadZip) {
+                        zipEntries[name] = new Uint8Array(await blob.arrayBuffer())
                     }
                     processed++
                 } catch (err) {
@@ -389,9 +400,12 @@ function App() {
                     <ProcessingPanel
                         downloadZip={downloadZip}
                         onToggleZip={() => setDownloadZip(v => !v)}
-                        uploadS3={uploadS3}
+                        uploadS3={uploadS3 && s3Available}
                         onToggleS3={() => setUploadS3(v => !v)}
                         s3Available={s3Available}
+                        accessCodeRequired={accessCodeRequired}
+                        accessCode={accessCode}
+                        onAccessCodeChange={setAccessCode}
                         onApply={handleApplyWatermark}
                         isProcessing={isProcessing}
                         progress={processProgress}

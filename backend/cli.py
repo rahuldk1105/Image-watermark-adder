@@ -34,6 +34,8 @@ def main():
     args = parser.parse_args()
 
     logo = cv2.imread(args.logo, cv2.IMREAD_UNCHANGED) if args.logo else None
+    if args.logo and logo is None:
+        parser.error(f"cannot read logo: {args.logo}")
     watermark = build_watermark(
         "logo" if args.logo else "text", logo=logo, text=args.text or "",
         text_color=args.color, remove_bg=args.remove_bg, bg_threshold=args.threshold,

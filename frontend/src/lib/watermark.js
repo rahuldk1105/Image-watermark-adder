@@ -186,10 +186,17 @@ export function alphaBlend(imageData, wmData, x, y, opacity) {
             const a = (wm[s + 3] / 255) * factor
             if (a === 0) continue
             const d = ((y + j) * imageData.width + (x + i)) * 4
-            // Uint8ClampedArray rounds and clamps to 0-255 on assignment
-            out[d] = (1 - a) * out[d] + a * wm[s]
-            out[d + 1] = (1 - a) * out[d + 1] + a * wm[s + 1]
-            out[d + 2] = (1 - a) * out[d + 2] + a * wm[s + 2]
+            // Source-over: for opaque images (dA = 1) this is O = (1 - a) * I + a * W;
+            // it also keeps the watermark visible over transparent PNG pixels.
+            // Uint8ClampedArray rounds and clamps to 0-255 on assignment.
+            const dA = out[d + 3] / 255
+            const outA = a + dA * (1 - a)
+            const keep = (dA * (1 - a)) / outA
+            const add = a / outA
+            out[d] = keep * out[d] + add * wm[s]
+            out[d + 1] = keep * out[d + 1] + add * wm[s + 1]
+            out[d + 2] = keep * out[d + 2] + add * wm[s + 2]
+            out[d + 3] = outA * 255
         }
     }
     return imageData

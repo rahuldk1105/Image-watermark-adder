@@ -79,12 +79,29 @@ def hex_to_bgr(color: str) -> Tuple[int, int, int]:
     return (b, g, r)
 
 
+# cv2.putText's Hershey fonts only cover ASCII; map common symbols to ASCII
+TEXT_REPLACEMENTS = {"\u00a9": "(c)", "\u00ae": "(R)", "\u2122": "TM",
+                     "\u2013": "-", "\u2014": "-", "\u2018": "'", "\u2019": "'",
+                     "\u201c": '"', "\u201d": '"'}
+
+
+def to_ascii_text(text: str) -> str:
+    """Prepare text for cv2.putText; reject characters the Hershey fonts cannot draw."""
+    for symbol, replacement in TEXT_REPLACEMENTS.items():
+        text = text.replace(symbol, replacement)
+    unsupported = sorted({ch for ch in text if not (" " <= ch <= "~")})
+    if unsupported:
+        raise ValueError("Text watermark supports ASCII characters only; unsupported: "
+                         + " ".join(unsupported))
+    return text
+
+
 def render_text_watermark(text: str, color: str = "#ffffff", outline: bool = True) -> np.ndarray:
     """
     Render a text watermark onto a transparent BGRA canvas using cv2.putText.
     The text is drawn large and later scaled (Step 3) like a logo.
     """
-    text = text.strip() or "Watermark"
+    text = to_ascii_text(text.strip()) or "Watermark"
     font = cv2.FONT_HERSHEY_DUPLEX
     scale, thickness = 4.0, 8
     stroke = thickness + 6 if outline else thickness

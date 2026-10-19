@@ -1180,3 +1180,17 @@ body {
     align-items: stretch;
   }
 }
+
+.access-code {
+  padding: 4px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 0.75rem;
+  outline: none;
+}
+
+.access-code:focus {
+  border-color: var(--accent-primary);
+}

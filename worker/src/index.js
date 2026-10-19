@@ -10,8 +10,13 @@
  * never reach the client.
  *
  * Configuration:
- *   vars:    S3_BUCKET, AWS_REGION, S3_PREFIX (optional)
- *   secrets: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY
+ *   vars:     S3_BUCKET, AWS_REGION, S3_PREFIX (optional)
+ *   secrets:  AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY,
+ *             UPLOAD_ACCESS_CODE (optional: required in the X-Upload-Code header)
+ *   bindings: UPLOAD_LIMITER (rate limit per client IP)
+ *
+ * Upload abuse protection: same-origin requests only, a per-IP rate limit, and
+ * optionally a shared access code so only people you give it to can write to S3.
  */
 
 import { AwsClient } from 'aws4fetch'
@@ -41,10 +46,46 @@ function objectUrl(env, key) {
     return `https://${env.S3_BUCKET}.s3.${env.AWS_REGION}.amazonaws.com/${path}`
 }
 
+/** Constant-time string comparison for the access code. */
+function safeEqual(a, b) {
+    const encoder = new TextEncoder()
+    const x = encoder.encode(a)
+    const y = encoder.encode(b)
+    let diff = x.length ^ y.length
+    for (let i = 0; i < Math.max(x.length, y.length); i++) {
+        diff |= (x[i] ?? 0) ^ (y[i] ?? 0)
+    }
+    return diff === 0
+}
+
+/** Returns an error Response when the caller may not upload, otherwise null. */
+async function checkUploadAccess(request, env) {
+    const origin = request.headers.get('Origin')
+    if (!origin || origin !== new URL(request.url).origin) {
+        return json({ error: 'Uploads are only accepted from this site' }, 403)
+    }
+
+    if (env.UPLOAD_ACCESS_CODE &&
+        !safeEqual(request.headers.get('X-Upload-Code') || '', env.UPLOAD_ACCESS_CODE)) {
+        return json({ error: 'Invalid upload access code' }, 401)
+    }
+
+    if (env.UPLOAD_LIMITER) {
+        const ip = request.headers.get('CF-Connecting-IP') || 'unknown'
+        const { success } = await env.UPLOAD_LIMITER.limit({ key: ip })
+        if (!success) {
+            return json({ error: 'Too many uploads, try again in a minute' }, 429)
+        }
+    }
+    return null
+}
+
 async function handleUpload(request, env) {
     if (!s3Configured(env)) {
         return json({ error: 'Amazon S3 is not configured' }, 503)
     }
+    const denied = await checkUploadAccess(request, env)
+    if (denied) return denied
 
     const contentType = (request.headers.get('Content-Type') || '').split(';')[0].trim()
     const ext = ALLOWED_TYPES[contentType]
@@ -96,7 +137,12 @@ export default {
         const { pathname } = new URL(request.url)
 
         if (pathname === '/api/health') {
-            return json({ status: 'ok', engine: 'browser', s3: s3Configured(env) })
+            return json({
+                status: 'ok',
+                engine: 'browser',
+                s3: s3Configured(env),
+                access_code_required: Boolean(env.UPLOAD_ACCESS_CODE)
+            })
         }
         if (pathname === '/api/upload') {
             if (request.method !== 'POST') {

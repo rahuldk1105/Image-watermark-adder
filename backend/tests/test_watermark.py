@@ -44,3 +44,14 @@ def test_remove_background():
     logo[2, 2] = 0
     out = remove_background(logo, 240)
     assert out[0, 0, 3] == 0 and out[2, 2, 3] == 255
+
+
+def test_text_watermark_maps_symbols_and_rejects_unsupported():
+    from watermark import to_ascii_text
+    assert to_ascii_text("© Adithya ™") == "(c) Adithya TM"
+    try:
+        to_ascii_text("ஆதித்யா")
+    except ValueError as e:
+        assert "ASCII" in str(e)
+    else:
+        raise AssertionError("expected ValueError")

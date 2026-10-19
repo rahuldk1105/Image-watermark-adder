@@ -60,7 +60,6 @@ class ApplyRequest(BaseModel):
     watermark: Optional[str] = None
     settings: WatermarkSettings
     upload_to_s3: bool = False
-    output_dir: Optional[str] = None  # optional: also save to a local folder
 
 
 def prepare_watermark(settings: WatermarkSettings, logo_b64: Optional[str]):
@@ -106,16 +105,13 @@ async def generate_preview(request: PreviewRequest):
 
 @app.post("/apply")
 async def apply_watermark_bulk(request: ApplyRequest):
-    """Watermark every image, optionally save locally and/or upload to Amazon S3."""
+    """Watermark every image and optionally upload the results to Amazon S3."""
     if request.upload_to_s3 and not s3_storage.is_configured():
         raise HTTPException(status_code=400, detail="S3_BUCKET is not configured")
     try:
         watermark = prepare_watermark(request.settings, request.watermark)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-
-    if request.output_dir:
-        os.makedirs(request.output_dir, exist_ok=True)
 
     results = []
     for item in request.images:
@@ -126,9 +122,6 @@ async def apply_watermark_bulk(request: ApplyRequest):
             entry = {"name": item.name, "ok": True, "report": report,
                      "data": bytes_to_data_uri(data, mime)}
 
-            if request.output_dir:
-                with open(os.path.join(request.output_dir, os.path.basename(item.name)), "wb") as f:
-                    f.write(data)
             if request.upload_to_s3:
                 entry["s3"] = s3_storage.upload_image(data, item.name, mime)
             results.append(entry)
