@@ -1,56 +1,20 @@
 {
-  "name": "bulk-image-watermarker",
-  "version": "2.2.0",
-  "description": "Bulk image watermarking desktop application",
-  "main": "electron/main.js",
-  "author": "Your Name",
-  "license": "MIT",
+  "name": "image-watermark-generation",
+  "version": "3.0.0",
+  "description": "Image watermark generation (Python + OpenCV algorithm, web app on Cloudflare Workers, Amazon S3 storage)",
   "private": true,
+  "license": "MIT",
   "scripts": {
-    "dev": "concurrently \"npm run dev:frontend\" \"npm run dev:electron\"",
-    "dev:frontend": "cd frontend && npm run dev",
-    "dev:electron": "wait-on http://localhost:5173 && electron .",
-    "build:frontend": "cd frontend && npm run build",
-    "build:backend": "cd backend && pyinstaller watermark.spec --noconfirm",
-    "build:electron": "electron-builder",
-    "build": "npm run build:frontend && npm run build:backend && npm run build:electron",
-    "postinstall": "cd frontend && npm install"
+    "postinstall": "npm --prefix frontend install",
+    "dev": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build",
+    "preview": "npm run build && wrangler dev",
+    "deploy": "npm run build && wrangler deploy"
+  },
+  "dependencies": {
+    "aws4fetch": "1.0.20"
   },
   "devDependencies": {
-    "concurrently": "^8.2.2",
-    "electron": "^28.1.0",
-    "electron-builder": "^24.9.1",
-    "wait-on": "^7.2.0"
-  },
-  "build": {
-    "appId": "com.watermarker.app",
-    "productName": "Bulk Image Watermarker",
-    "directories": {
-      "output": "dist"
-    },
-    "files": [
-      "electron/**/*",
-      "frontend/dist/**/*"
-    ],
-    "extraResources": [
-      {
-        "from": "backend/dist/watermark-backend.exe",
-        "to": "backend/watermark-backend.exe"
-      }
-    ],
-    "win": {
-      "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        }
-      ]
-    },
-    "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true
-    }
+    "wrangler": "4.42.0"
   }
 }

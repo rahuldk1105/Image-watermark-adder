@@ -1,6 +1,6 @@
 import { Icons } from './Icons'
 
-function PreviewPanel({ images, selectedIndex, previewImage, isLoading, onSelectImage }) {
+function PreviewPanel({ images, selectedIndex, previewImage, report, isLoading, onSelectImage }) {
 
     const selectedImage = images[selectedIndex]
 
@@ -19,7 +19,7 @@ function PreviewPanel({ images, selectedIndex, previewImage, isLoading, onSelect
                             onChange={(e) => onSelectImage(parseInt(e.target.value))}
                         >
                             {images.map((img, index) => (
-                                <option key={img.path} value={index}>
+                                <option key={img.id} value={index}>
                                     {img.name}
                                 </option>
                             ))}
@@ -45,7 +45,7 @@ function PreviewPanel({ images, selectedIndex, previewImage, isLoading, onSelect
                 ) : selectedImage ? (
                     <div className="preview-image-container">
                         <img
-                            src={selectedImage.data}
+                            src={selectedImage.url}
                             alt="Original"
                             className="preview-image preview-image-original"
                         />
@@ -59,6 +59,30 @@ function PreviewPanel({ images, selectedIndex, previewImage, isLoading, onSelect
                     </div>
                 )}
             </div>
+
+            {report && previewImage && !isLoading && (
+                <div className="algorithm-report">
+                    <span className="report-title">
+                        {report.scores ? 'Smart placement chose' : 'Placed at'}{' '}
+                        <strong>{report.position.replace('-', ' ')}</strong>
+                    </span>
+                    {report.scores && (
+                        <div className="report-scores">
+                            {Object.entries(report.scores)
+                                .sort((a, b) => a[1] - b[1])
+                                .map(([name, score]) => (
+                                    <span
+                                        key={name}
+                                        className={name === report.position ? 'chosen' : ''}
+                                        title="Mean Sobel gradient magnitude (lower = smoother)"
+                                    >
+                                        {name.replace('-', ' ')}: {score.toFixed(1)}
+                                    </span>
+                                ))}
+                        </div>
+                    )}
+                </div>
+            )}
         </div>
     )
 }

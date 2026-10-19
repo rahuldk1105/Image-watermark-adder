@@ -1,5 +1,7 @@
-import { useCallback } from 'react'
+import { useCallback, useRef } from 'react'
 import { Icons } from './Icons'
+
+const IMAGE_PATTERN = /\.(jpe?g|png|webp|bmp)$/i
 
 function ImageUploader({
     images,
@@ -11,15 +13,19 @@ function ImageUploader({
     isLoading,
     uploadProgress
 }) {
+    const inputRef = useRef(null)
 
-    const handleClick = async () => {
+    const handleClick = () => {
         if (isLoading) return
-        if (window.electronAPI) {
-            const paths = await window.electronAPI.selectImages()
-            if (paths.length > 0) {
-                onSelect(paths)
-            }
+        inputRef.current?.click()
+    }
+
+    const handleInputChange = (e) => {
+        const files = Array.from(e.target.files || []).filter(f => IMAGE_PATTERN.test(f.name))
+        if (files.length > 0) {
+            onSelect(files)
         }
+        e.target.value = ''
     }
 
     const handleDragOver = useCallback((e) => {
@@ -32,13 +38,9 @@ function ImageUploader({
         e.stopPropagation()
         if (isLoading) return
 
-        const files = Array.from(e.dataTransfer.files)
-        const imagePaths = files
-            .filter(f => /\.(jpg|jpeg|png|webp|bmp)$/i.test(f.name))
-            .map(f => f.path)
-
-        if (imagePaths.length > 0) {
-            onSelect(imagePaths)
+        const files = Array.from(e.dataTransfer.files).filter(f => IMAGE_PATTERN.test(f.name))
+        if (files.length > 0) {
+            onSelect(files)
         }
     }, [onSelect, isLoading])
 
@@ -48,6 +50,15 @@ function ImageUploader({
 
     return (
         <div>
+            <input
+                ref={inputRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/bmp"
+                multiple
+                hidden
+                onChange={handleInputChange}
+            />
+
             {/* Loading Overlay */}
             {isLoading && (
                 <div className="upload-loading">
@@ -102,11 +113,11 @@ function ImageUploader({
                     <div className="image-list" style={{ marginTop: '12px' }}>
                         {images.map((img, index) => (
                             <div
-                                key={img.path}
+                                key={img.id}
                                 className={`image-list-item ${index === selectedIndex ? 'selected' : ''}`}
                                 onClick={() => onSelectImage(index)}
                             >
-                                <img src={img.data} alt={img.name} />
+                                <img src={img.url} alt={img.name} />
                                 <span>{img.name}</span>
                                 <button
                                     onClick={(e) => {
