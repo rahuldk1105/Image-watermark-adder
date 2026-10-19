@@ -121,6 +121,15 @@ The app is served at `https://image-watermark-generation.<your-subdomain>.worker
   Workers") and `CLOUDFLARE_ACCOUNT_ID`. `.github/workflows/deploy.yml` runs the tests and deploys
   from `main`.
 
+### Blank page after deploying?
+
+If the browser console shows *"Expected a JavaScript module script but the server responded with a
+MIME type of text/jsx"*, the host is serving the unbuilt source (`frontend/index.html` →
+`/src/main.jsx`) instead of the build output. Deploy as a **Worker** (above): `wrangler.jsonc`
+runs `npm run build` before every `wrangler deploy`. If you use **Cloudflare Pages** instead, set
+*Build command* `npm run build` and *Build output directory* `frontend/dist` (the S3 upload API is
+only available on the Worker).
+
 ### Amazon S3 setup
 
 1. Create a bucket (e.g. in `ap-south-1`), keep "Block all public access" on.
